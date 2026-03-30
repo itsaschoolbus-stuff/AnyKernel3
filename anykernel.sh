@@ -1,121 +1,247 @@
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
+# AnyKernel3 Ramdisk Mod Script
+# osm0sis @ xda-developers
+#
+# E404R kernel custom installer by 113
+# What are you looking for ?
 
-### AnyKernel setup
-# global properties
 properties() { '
-kernel.string=ExampleKernel by osm0sis @ xda-developers
-do.devicecheck=1
+kernel.string=\\ E404R Kernel by Project 113 \\
 do.modules=0
 do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=maguro
-device.name2=toro
-device.name3=toroplus
-device.name4=tuna
-device.name5=
-supported.versions=
-supported.patchlevels=
-supported.vendorpatchlevels=
-'; } # end properties
+'; }
 
+devicecheck() {
+  local device devicename match product testname vendordevice vendorproduct;
+  device=$(getprop ro.product.device 2>/dev/null);
+  product=$(getprop ro.build.product 2>/dev/null);
+  vendordevice=$(getprop ro.product.vendor.device 2>/dev/null);
+  vendorproduct=$(getprop ro.vendor.product.device 2>/dev/null);
+  for testname in $(grep 'devicename' anykernel.sh | cut -d= -f2-); do
+    for devicename in $device $product $vendordevice $vendorproduct; do
+      if [[ "$devicename" == *"$testname"* ]]; then
+        match=1
+        break
+      fi
+    done
+  done
+  if [[ ! "$match" ]]; then
+    abort " " " Unsupported device. Aborting...";
+  fi
+}
 
-### AnyKernel install
-## boot files attributes
-boot_attributes() {
-set_perm_recursive 0 0 755 644 $RAMDISK/*;
-set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-} # end attributes
+select_option() {
+  ui_print " - $1 :"
+  ui_print "  (Vol +) $2"
+  ui_print "  (Vol -) $3"
 
-# boot shell variables
-BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;
-IS_SLOT_DEVICE=0;
-RAMDISK_COMPRESSION=auto;
-PATCH_VBMETA_FLAG=auto;
+  SELECT_RESULT=""
+  while true; do
+    key_event=$(getevent -qlc 1)
+    case "$key_event" in
+      *"KEY_VOLUMEUP"*"DOWN"*|*"KEY_VOLUMEUP"*"1"*)
+        ui_print "  Selected : $2" " "
+        SELECT_RESULT="$2"
+        break
+        ;;
+      *"KEY_VOLUMEDOWN"*"DOWN"*|*"KEY_VOLUMEDOWN"*"1"*)
+        ui_print "  Selected : $3" " "
+        SELECT_RESULT="$3"
+        break
+        ;;
+    esac
+    sleep 0.1
+  done
+  echo "$SELECT_RESULT"
+}
 
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh;
+configure_manual() {
+  # ROM selection
+  select_option "ROM/DTBO Type" "AOSP/CLO" "MIUI/HyperOS"
+  rom_sel="$SELECT_RESULT"
+  case "$rom_sel" in
+    *AOSP*|*CLO*)
+      [ "$oplus" != "1" ] && rom="rom_aosp"
+      dtbo="dtbo_def"
+      ;;
+    *MIUI*|*HyperOS*)
+      [ "$oplus" != "1" ] && rom="rom_oem"
+      dtbo="dtbo_oem"
+      ;;
+  esac
 
-# boot install
-dump_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
+  # DTB selection
+  select_option "DTB CPU Frequency" "EFFCPU" "Default"
+  dtb_sel="$SELECT_RESULT"
+  case "$dtb_sel" in
+    *EFFCPU*) dtb="dtb_effcpu" ;;
+    *) dtb="dtb_def" ;;
+  esac
 
-# init.rc
-backup_file init.rc;
-replace_string init.rc "cpuctl cpu,timer_slack" "mount cgroup none /dev/cpuctl cpu" "mount cgroup none /dev/cpuctl cpu,timer_slack";
+  # Battery profile (Alioth only)
+  if [[ "$devicename" == "alioth" ]]; then
+    select_option "Battery Profile" "5000mAh" "Default"
+    batt_sel="$SELECT_RESULT"
+    case "$batt_sel" in
+      *5000*) batt="batt_5k" ;;
+      *) batt="batt_def" ;;
+    esac
+  else
+    batt="batt_def"
+  fi
 
-# init.tuna.rc
-backup_file init.tuna.rc;
-insert_line init.tuna.rc "nodiratime barrier=0" after "mount_all /fstab.tuna" "\tmount ext4 /dev/block/platform/omap/omap_hsmmc.0/by-name/userdata /data remount nosuid nodev noatime nodiratime barrier=0";
-append_file init.tuna.rc "bootscript" init.tuna;
+  ui_print " Manual configuration done !" " "
+  sleep 0.5
+}
 
-# fstab.tuna
-backup_file fstab.tuna;
-patch_fstab fstab.tuna /system ext4 options "noatime,barrier=1" "noatime,nodiratime,barrier=0";
-patch_fstab fstab.tuna /cache ext4 options "barrier=1" "barrier=0,nomblk_io_submit";
-patch_fstab fstab.tuna /data ext4 options "data=ordered" "nomblk_io_submit,data=writeback";
-append_file fstab.tuna "usbdisk" fstab;
+configure_auto() {
+  sleep 0.5
+  miprops="$(file_getprop /vendor/build.prop "ro.vendor.miui.build.region" 2>/dev/null)"
+  if [[ -z "$miprops" ]]; then
+    miprops="$(file_getprop /product/etc/build.prop "ro.miui.build.region" 2>/dev/null)"
+  fi
+  case "$miprops" in
+    cn|in|ru|id|eu|tr|tw|gb|global|mx|jp|kr|lm|cl|mi)
+      ui_print "--> Miui/HyperOS ROM detected, configuring..."
+      rom="rom_oem"
+      dtbo="dtbo_oem"
+      ;;
+    *)
+      if [[ "$oplus" != "1" ]]; then
+        ui_print "--> AOSP/CLO ROM detected, configuring..."
+        rom="rom_aosp"
+        dtbo="dtbo_def"
+      else
+        ui_print "--> Oplus Port ROM detected, configuring..."
+        rom="rom_port"
+        dtbo="dtbo_oem"
+      fi
+      ;;
+  esac
 
-write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
-## end boot install
+  sleep 0.5
+  if [[ "$ZIPFILE" == *effcpu* || "$ZIPFILE" == *EFFCPU* ]]; then
+    ui_print "--> EFFCPUFreq is detected, configuring..."
+    dtb="dtb_effcpu"
+  else
+    ui_print "--> EFFCPUFreq not detected, skipping..."
+    dtb="dtb_def"
+  fi
 
+  sleep 0.5
+  if [[ "$devicename" == "alioth" ]]; then
+    if [[ "$ZIPFILE" == *5k* || "$ZIPFILE" == *5K* ]]; then
+      ui_print "--> 5K battery profile detected, configuring..."
+      batt="batt_5k"
+    else
+      ui_print "--> Stock Alioth battery profile, configuring..."
+      batt="batt_def"
+    fi
+  else
+    batt="batt_def"
+  fi
 
-## init_boot files attributes
-#init_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $RAMDISK/*;
-#set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-#} # end attributes
+  ui_print " " " Auto configuration done !" " "
+  sleep 0.5
+}
 
-# init_boot shell variables
-#BLOCK=init_boot;
-#IS_SLOT_DEVICE=1;
-#RAMDISK_COMPRESSION=auto;
-#PATCH_VBMETA_FLAG=auto;
+choose_config_mode() {
+  ui_print "--> Select Kernel Configuration :"
+  ui_print "  (Vol +) Manual Configuration "
+  ui_print "  (Vol -) Auto Configuration "
+  ui_print "  ! Timeout in 8 seconds, defaults to Auto"
 
-# reset for init_boot patching
-#reset_ak;
+  local timeout=8
+  local start now key_event
 
-# init_boot install
-#dump_boot; # unpack ramdisk since it is the new first stage init ramdisk where overlay.d must go
+  start=$(date +%s)
 
-#write_boot;
-## end init_boot install
+  while :; do
+    key_event=$(timeout 0.2 getevent -qlc 1 2>/dev/null)
 
+    if [ -n "$key_event" ]; then
+      if echo "$key_event" | grep -q "KEY_VOLUMEUP"; then
+        ui_print "  Selected : Manual Configuration" " "
+        configure_manual
+        return 0
+      fi
 
-## vendor_kernel_boot shell variables
-#BLOCK=vendor_kernel_boot;
-#IS_SLOT_DEVICE=1;
-#RAMDISK_COMPRESSION=auto;
-#PATCH_VBMETA_FLAG=auto;
+      if echo "$key_event" | grep -q "KEY_VOLUMEDOWN"; then
+        ui_print "  Selected : Auto Configuration" " "
+        configure_auto
+        return 0
+      fi
+    fi
 
-# reset for vendor_kernel_boot patching
-#reset_ak;
+    now=$(date +%s)
+    if [ $((now - start)) -ge $timeout ]; then
+      ui_print "  ! Timeout reached" " "
+      configure_auto
+      return 0
+    fi
+  done
+}
 
-# vendor_kernel_boot install
-#split_boot; # skip unpack/repack ramdisk, e.g. for dtb on devices with hdr v4 and vendor_kernel_boot
+#
+# Install begins here
+# 
 
-#flash_boot;
-## end vendor_kernel_boot install
+devicename=alioth
+case "$devicename" in
+  munch|alioth|pipa)
+    is_slot_device=1;
+  ;;
+  apollo|lmi)
+    is_slot_device=0;
+  ;;
+esac
+block=/dev/block/bootdevice/by-name/boot
+ramdisk_compression=auto
+patch_vbmeta_flag=auto
 
+. tools/ak3-core.sh
 
-## vendor_boot files attributes
-#vendor_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $RAMDISK/*;
-#set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-#} # end attributes
+if [[ -f /vendor/OemPorts10T.prop ]] ||
+  [[ -f /vendor/etc/init/OemPorts10T.rc ]]; then
+  ui_print " ! Detected OPLUS Port ROM by Dandaa !"
+  ui_print " ! Manual Configuration is Recommended !"
+  ui_print " Note : Port ROM Usually Need KernelSU Root !"
+  oplus=1
+else
+  oplus=0
+  devicecheck
+fi
 
-# vendor_boot shell variables
-#BLOCK=vendor_boot;
-#IS_SLOT_DEVICE=1;
-#RAMDISK_COMPRESSION=auto;
-#PATCH_VBMETA_FLAG=auto;
+sleep 0.5
+if [[ "$SIDELOAD" == "1" ]]; then
+  ui_print " " " ! Sideloading Detected, Overriding to Manual Configuration !"
+  configure_manual
+else
+  choose_config_mode
+fi
 
-# reset for vendor_boot patching
-#reset_ak;
+dump_boot
 
-# vendor_boot install
-#dump_boot; # use split_boot to skip ramdisk unpack, e.g. for dtb on devices with hdr v4 but no vendor_kernel_boot
+ui_print "--> Applying configuration..."
+ui_print " $rom,$dtbo,$dtb,$batt"
+patch_cmdline "e404_args" "e404_args=$rom,$dtbo,$dtb,$batt"
 
-#write_boot; # use flash_boot to skip ramdisk repack, e.g. for dtb on devices with hdr v4 but no vendor_kernel_boot
-## end vendor_boot install
+write_boot
 
+if [[ $is_slot_device == 1 ]]; then
+ ui_print "--> Installing to vendor_boot partition... "
+  block=/dev/block/bootdevice/by-name/vendor_boot
+  ramdisk_compression=auto
+  patch_vbmeta_flag=auto
+  reset_ak
+  dump_boot
+  write_boot
+else
+  ui_print "--> Installing to boot partition... "
+fi
+
+if [[ ! -f /vendor/etc/task_profiles.json ]]; then
+	ui_print " " " Note : Uclamp Task Profile Not Found ! " " "
+fi
+
+ui_print " " " E404R Kernel @ Project113 "
+ui_print " " " --- Install Complete --- "
